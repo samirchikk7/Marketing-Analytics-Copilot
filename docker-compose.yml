@@ -1,0 +1,9 @@
+services:
+  marketing-copilot:
+    build: .
+    container_name: marketing-analytics-copilot
+    ports:
+      - "8501:8501"
+    environment:
+      - META_ACCESS_TOKEN=${META_ACCESS_TOKEN:-}
+      - META_AD_ACCOUNT_ID=${META_AD_ACCOUNT_ID:-}
