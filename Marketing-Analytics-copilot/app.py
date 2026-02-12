@@ -559,11 +559,19 @@ with tab_insights:
         with st.spinner("Генерируем инсайты с помощью локальной модели..."):
             summary_text = build_text_summary(df_campaigns, df_channels)
             prompt = marketing_insights_prompt(summary_text)
-            answer = ask_llm(prompt)
-            st.session_state["insights_answer"] = answer
+            try:
+                answer = ask_llm(prompt)
+                st.session_state["insights_answer"] = answer
+            except RuntimeError as exc:
+                st.error(str(exc))
+                st.info(
+                    "Если приложение запущено в Streamlit Cloud, укажи внешний LLM endpoint через "
+                    "переменную окружения OLLAMA_URL (и при необходимости OLLAMA_MODEL)."
+                )
 
-        st.markdown("### 🧠 Ответ модели")
-        st.markdown(st.session_state["insights_answer"])
+        if st.session_state.get("insights_answer"):
+            st.markdown("### 🧠 Ответ модели")
+            st.markdown(st.session_state["insights_answer"])
 
 
 
@@ -586,11 +594,19 @@ with tab_abtests:
         with st.spinner("Генерируем A/B-гипотезы с помощью локальной модели..."):
             ab_summary = build_ab_test_summary(df_campaigns, df_channels)
             ab_prompt = marketing_ab_test_prompt(ab_summary)
-            ab_answer = ask_llm(ab_prompt)
-            st.session_state["ab_answer"] = ab_answer
+            try:
+                ab_answer = ask_llm(ab_prompt)
+                st.session_state["ab_answer"] = ab_answer
+            except RuntimeError as exc:
+                st.error(str(exc))
+                st.info(
+                    "Для Streamlit Cloud используй внешний LLM endpoint и задай OLLAMA_URL/OLLAMA_MODEL "
+                    "в Secrets приложения."
+                )
 
-        st.markdown("### 🧪 Предложенные A/B-гипотезы")
-        st.markdown(st.session_state["ab_answer"])
+        if st.session_state.get("ab_answer"):
+            st.markdown("### 🧪 Предложенные A/B-гипотезы")
+            st.markdown(st.session_state["ab_answer"])
 
 
 report_snapshot = {

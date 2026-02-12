@@ -47,6 +47,17 @@ git push -u origin <your-branch>
    - `META_AD_ACCOUNT_ID`
 4. Нажми Deploy — получишь публичную ссылку.
 
+### Важно про вкладку «Инсайты ИИ» в облаке
+- По умолчанию в коде стоит `OLLAMA_URL=http://localhost:11434/api/chat`.
+- На Streamlit Cloud `localhost` — это контейнер самого приложения, там обычно **нет запущенного Ollama**.
+- Поэтому при нажатии «Сгенерировать инсайты» может быть `requests.exceptions.ConnectionError`.
+
+Что делать:
+1. Либо отключить/скрыть LLM-кнопки в облачной версии.
+2. Либо подключить внешний endpoint и задать в Secrets:
+   - `OLLAMA_URL=https://<your-endpoint>/api/chat`
+   - `OLLAMA_MODEL=phi3` (или ваша модель)
+
 ### Вариант B: Render / Railway
 - Подключи GitHub репозиторий.
 - Команда запуска:
