@@ -80,3 +80,25 @@ git push -u origin <your-branch>
 ```bash
 META_ACCESS_TOKEN=... META_AD_ACCOUNT_ID=... docker compose up --build
 ```
+
+
+## 6) Можно ли подключить собственную LLM?
+Да. Поддерживаются 2 режима через переменные окружения:
+
+### Режим 1: локальная Ollama (по умолчанию)
+```bash
+LLM_PROVIDER=ollama
+OLLAMA_URL=http://localhost:11434/api/chat
+OLLAMA_MODEL=phi3
+```
+
+### Режим 2: свой OpenAI-compatible endpoint
+Подходит для self-hosted LLM шлюзов (например vLLM/TGI/LM Studio/OpenRouter-совместимый API).
+```bash
+LLM_PROVIDER=openai_compatible
+OPENAI_BASE_URL=https://<your-endpoint>/v1
+OPENAI_MODEL=<your-model>
+OPENAI_API_KEY=<your-key>
+```
+
+Для Streamlit Cloud эти переменные добавляются в **App → Settings → Secrets**.
