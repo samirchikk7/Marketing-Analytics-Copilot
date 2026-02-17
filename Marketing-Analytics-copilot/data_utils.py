@@ -1,4 +1,16 @@
+import io
+import os
+
 import pandas as pd
+import requests
+
+
+def normalize_date_columns(df: pd.DataFrame) -> pd.DataFrame:
+    for col in ["date", "datetime", "timestamp"]:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
 
 def load_marketing_data(file) -> pd.DataFrame:
     if file.name.endswith(".csv"):
@@ -6,12 +18,80 @@ def load_marketing_data(file) -> pd.DataFrame:
     else:
         df = pd.read_excel(file)
 
-    # Пробуем распарсить дату
-    for col in ["date", "datetime", "timestamp"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return normalize_date_columns(df)
 
-    return df
+
+def load_marketing_data_from_url(url: str, timeout: int = 20) -> pd.DataFrame:
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+
+    content_type = response.headers.get("Content-Type", "")
+    raw = response.content
+    if url.lower().endswith(".xlsx") or "spreadsheet" in content_type:
+        df = pd.read_excel(io.BytesIO(raw))
+    else:
+        df = pd.read_csv(io.BytesIO(raw))
+
+    return normalize_date_columns(df)
+
+
+def load_from_json_api(endpoint: str, records_field: str = "data", timeout: int = 20) -> pd.DataFrame:
+    response = requests.get(endpoint, timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+
+    if isinstance(payload, list):
+        df = pd.DataFrame(payload)
+    elif isinstance(payload, dict):
+        records = payload.get(records_field, payload)
+        if isinstance(records, list):
+            df = pd.DataFrame(records)
+        else:
+            df = pd.DataFrame([records])
+    else:
+        raise ValueError("Unsupported JSON payload format")
+
+    return normalize_date_columns(df)
+
+
+def fetch_meta_ads_example() -> pd.DataFrame:
+    token = os.getenv("META_ACCESS_TOKEN")
+    ad_account_id = os.getenv("META_AD_ACCOUNT_ID")
+    if not token or not ad_account_id:
+        raise ValueError("Set META_ACCESS_TOKEN and META_AD_ACCOUNT_ID environment variables")
+
+    endpoint = f"https://graph.facebook.com/v20.0/act_{ad_account_id}/insights"
+    params = {
+        "access_token": token,
+        "fields": "date_start,campaign_name,impressions,clicks,spend,actions",
+        "level": "campaign",
+        "time_increment": 1,
+        "limit": 200,
+    }
+    response = requests.get(endpoint, params=params, timeout=25)
+    response.raise_for_status()
+    rows = response.json().get("data", [])
+
+    normalized = []
+    for row in rows:
+        conversions = 0
+        for action in row.get("actions", []):
+            if action.get("action_type") in {"purchase", "offsite_conversion.purchase"}:
+                conversions += float(action.get("value", 0))
+
+        normalized.append(
+            {
+                "date": row.get("date_start"),
+                "campaign": row.get("campaign_name"),
+                "channel": "meta_ads",
+                "impressions": float(row.get("impressions", 0)),
+                "clicks": float(row.get("clicks", 0)),
+                "spend": float(row.get("spend", 0)),
+                "conversions": conversions,
+            }
+        )
+
+    return normalize_date_columns(pd.DataFrame(normalized))
 
 
 def add_basic_metrics(df: pd.DataFrame) -> pd.DataFrame:
@@ -48,7 +128,6 @@ def build_text_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame) ->
     lines = []
     lines.append("Краткое описание данных по маркетинговым кампаниям.\n")
 
-    # Топ кампаний по расходам
     lines.append("Агрегация по кампаниям (топ 5 по расходам):")
     if "spend" in df_campaigns.columns:
         top_campaigns = df_campaigns.sort_values("spend", ascending=False).head(5)
@@ -62,7 +141,6 @@ def build_text_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame) ->
             f"CPA: {row.get('cpa',0):.2f}"
         )
 
-    # Топ каналов
     lines.append("\nАгрегация по каналам (топ 5):")
     df_channels_sorted = (
         df_channels.sort_values("spend", ascending=False).head(5)
@@ -77,23 +155,16 @@ def build_text_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame) ->
         )
 
     summary = "\n".join(lines)
-    return summary[:4000]  # safety cut
+    return summary[:4000]
 
-
-# === НОВАЯ ФУНКЦИЯ ДЛЯ A/B-ТЕСТОВ ===
 
 def build_ab_test_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame) -> str:
-    """
-    Краткая текстовая выжимка для построения A/B-гипотез.
-    """
     lines = []
     lines.append("Данные для генерации A/B-гипотез.\n")
 
-    # ==== ROAS ====
     if "roas" in df_campaigns.columns and "spend" in df_campaigns.columns:
         df_valid = df_campaigns.dropna(subset=["roas"])
         if not df_valid.empty:
-            # TOP ROAS
             lines.append("Кампании с высоким ROAS (топ 5):")
             for _, row in df_valid.sort_values("roas", ascending=False).head(5).iterrows():
                 lines.append(
@@ -101,7 +172,6 @@ def build_ab_test_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame)
                     f"ROAS: {row.get('roas',0):.2f} | CPA: {row.get('cpa',0):.2f}"
                 )
 
-            # LOW ROAS
             lines.append("\nКампании с низким ROAS (антитоп 5):")
             for _, row in df_valid.sort_values("roas", ascending=True).head(5).iterrows():
                 lines.append(
@@ -109,7 +179,6 @@ def build_ab_test_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame)
                     f"ROAS: {row.get('roas',0):.2f} | CPA: {row.get('cpa',0):.2f}"
                 )
 
-    # ==== CTR ====
     if "ctr" in df_campaigns.columns:
         df_ctr = df_campaigns.dropna(subset=["ctr"])
         if not df_ctr.empty:
@@ -127,7 +196,6 @@ def build_ab_test_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame)
                     f"CTR: {row.get('ctr',0):.4f} | CPA: {row.get('cpa',0):.2f}"
                 )
 
-    # ==== Каналы ====
     if "channel" in df_channels.columns:
         lines.append("\nСводка по каналам:")
         for _, row in df_channels.iterrows():
@@ -137,4 +205,4 @@ def build_ab_test_summary(df_campaigns: pd.DataFrame, df_channels: pd.DataFrame)
             )
 
     summary = "\n".join(lines)
-    return summary[:4000]  # safety cut
+    return summary[:4000]

@@ -2,9 +2,13 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
+import numpy as np
 
 from data_utils import (
     load_marketing_data,
+    load_marketing_data_from_url,
+    load_from_json_api,
+    fetch_meta_ads_example,
     add_basic_metrics,
     aggregate_by,
     build_text_summary,
@@ -19,6 +23,49 @@ st.set_page_config(
     page_icon="📊",
     layout="wide",
 )
+
+
+def _safe_metric_value(value, default=0.0):
+    if pd.isna(value) or np.isinf(value):
+        return default
+    return float(value)
+
+
+def build_data_quality_table(df_input: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for col in ["impressions", "clicks", "spend", "conversions", "revenue"]:
+        if col in df_input.columns:
+            col_data = df_input[col]
+            rows.append(
+                {
+                    "Метрика": col,
+                    "Пропуски": int(col_data.isna().sum()),
+                    "Нули": int((col_data == 0).sum()) if pd.api.types.is_numeric_dtype(col_data) else "—",
+                    "Доля пропусков": f"{(col_data.isna().mean() * 100):.1f}%",
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def build_markdown_report(kpi_snapshot: dict, summary_text: str, insights_text: str, ab_text: str) -> str:
+    return f"""# Marketing Analytics Report
+
+## KPI Snapshot
+- Spend: {kpi_snapshot['spend']:,.2f}
+- Revenue: {kpi_snapshot['revenue']:,.2f}
+- ROAS: {kpi_snapshot['roas']:.2f}
+- CPA: {kpi_snapshot['cpa']:.2f}
+
+## Data Summary
+{summary_text}
+
+## LLM Insights
+{insights_text or 'Пока не сгенерировано.'}
+
+## A/B Hypotheses
+{ab_text or 'Пока не сгенерировано.'}
+"""
 
 # === АНИМИРОВАННЫЙ ФОН И СТИЛИ ===
 st.markdown(
@@ -161,21 +208,79 @@ st.markdown(
 st.title("📊 Marketing Analytics Copilot")
 st.caption("Загрузи данные по кампаниям → получи метрики, дашборд и инсайты от локальной LLM")
 
-# --- Загрузка файла ---
-uploaded_file = st.file_uploader(
-    "Загрузи CSV или Excel с данными кампаний (impressions, clicks, spend, conversions, revenue, campaign, channel, date, ...)",
-    type=["csv", "xlsx"],
+if "insights_answer" not in st.session_state:
+    st.session_state["insights_answer"] = ""
+if "ab_answer" not in st.session_state:
+    st.session_state["ab_answer"] = ""
+if "df_raw" not in st.session_state:
+    st.session_state["df_raw"] = None
+if "data_source_label" not in st.session_state:
+    st.session_state["data_source_label"] = ""
+
+# --- Загрузка файла / подключение источника ---
+source_type = st.sidebar.radio(
+    "Источник данных",
+    ["Файл (CSV/XLSX)", "CSV/XLSX по URL", "JSON API", "Meta Ads (example API)"],
 )
 
-if uploaded_file is None:
+uploaded_file = None
+df_raw = None
+
+if source_type == "Файл (CSV/XLSX)":
+    uploaded_file = st.file_uploader(
+        "Загрузи CSV или Excel с данными кампаний (impressions, clicks, spend, conversions, revenue, campaign, channel, date, ...)",
+        type=["csv", "xlsx"],
+    )
+    if uploaded_file is not None:
+        df_raw = load_marketing_data(uploaded_file)
+        st.session_state["df_raw"] = df_raw
+        st.session_state["data_source_label"] = f"file:{uploaded_file.name}"
+
+elif source_type == "CSV/XLSX по URL":
+    data_url = st.text_input("Ссылка на CSV/XLSX", placeholder="https://.../marketing.csv")
+    if st.button("Подтянуть данные по URL") and data_url:
+        try:
+            df_raw = load_marketing_data_from_url(data_url)
+            st.session_state["df_raw"] = df_raw
+            st.session_state["data_source_label"] = f"url:{data_url}"
+        except Exception as exc:
+            st.error(f"Не удалось загрузить данные по URL: {exc}")
+
+elif source_type == "JSON API":
+    api_url = st.text_input("API endpoint", placeholder="https://api.example.com/metrics")
+    records_field = st.text_input("Поле с массивом записей (если JSON-объект)", value="data")
+    if st.button("Подтянуть данные из API") and api_url:
+        try:
+            df_raw = load_from_json_api(api_url, records_field=records_field)
+            st.session_state["df_raw"] = df_raw
+            st.session_state["data_source_label"] = f"api:{api_url}"
+        except Exception as exc:
+            st.error(f"Не удалось загрузить данные из API: {exc}")
+
+elif source_type == "Meta Ads (example API)":
+    st.caption("Нужны переменные окружения META_ACCESS_TOKEN и META_AD_ACCOUNT_ID")
+    if st.button("Подтянуть из Meta Ads"):
+        try:
+            df_raw = fetch_meta_ads_example()
+            st.session_state["df_raw"] = df_raw
+            st.session_state["data_source_label"] = "meta_ads"
+        except Exception as exc:
+            st.error(f"Ошибка подключения к Meta Ads: {exc}")
+
+if df_raw is None and st.session_state.get("df_raw") is not None:
+    df_raw = st.session_state["df_raw"]
+
+if df_raw is None:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.info("Загрузи файл, чтобы начать анализ.")
+    st.info("Выбери источник и загрузи данные, чтобы начать анализ.")
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
+st.success(f"Источник подключен: {st.session_state.get('data_source_label', 'custom')}")
+
 # --- Чтение и базовые метрики ---
-df_raw = load_marketing_data(uploaded_file)
 df = add_basic_metrics(df_raw)
+rows_before_filters = len(df)
 
 # --- Фильтры в сайдбаре ---
 st.sidebar.header("Фильтры")
@@ -216,6 +321,8 @@ if "campaign" in df.columns:
     )
     if selected_campaigns:
         df = df[df["campaign"].isin(selected_campaigns)]
+
+rows_after_filters = len(df)
 
 if df.empty:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -260,6 +367,38 @@ overall_cpc = total_spend / total_clicks if total_clicks > 0 else 0
 overall_cpa = total_spend / total_conversions if total_conversions > 0 else 0
 overall_roas = total_revenue / total_spend if total_spend > 0 else 0
 
+best_channel = "—"
+best_channel_roas = 0.0
+worst_channel = "—"
+worst_channel_cpa = 0.0
+if "channel" in df_channels.columns:
+    if "roas" in df_channels.columns and not df_channels["roas"].dropna().empty:
+        top_row = df_channels.dropna(subset=["roas"]).sort_values("roas", ascending=False).iloc[0]
+        best_channel = str(top_row.get("channel", "—"))
+        best_channel_roas = _safe_metric_value(top_row.get("roas", 0.0), 0.0)
+    if "cpa" in df_channels.columns and not df_channels["cpa"].dropna().empty:
+        bottom_row = df_channels.dropna(subset=["cpa"]).sort_values("cpa", ascending=False).iloc[0]
+        worst_channel = str(bottom_row.get("channel", "—"))
+        worst_channel_cpa = _safe_metric_value(bottom_row.get("cpa", 0.0), 0.0)
+
+period_spend_delta = 0.0
+period_revenue_delta = 0.0
+if df_time is not None and len(df_time) >= 2:
+    half = len(df_time) // 2
+    first_half = df_time.iloc[:half] if half > 0 else df_time.iloc[:1]
+    second_half = df_time.iloc[half:] if half > 0 else df_time.iloc[-1:]
+
+    first_spend = first_half["spend"].sum() if "spend" in first_half.columns else 0.0
+    second_spend = second_half["spend"].sum() if "spend" in second_half.columns else 0.0
+    if first_spend > 0:
+        period_spend_delta = (second_spend - first_spend) / first_spend
+
+    if "revenue" in df_time.columns:
+        first_rev = first_half["revenue"].sum()
+        second_rev = second_half["revenue"].sum()
+        if first_rev > 0:
+            period_revenue_delta = (second_rev - first_rev) / first_rev
+
 kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
 
 with kpi_col1:
@@ -291,6 +430,19 @@ with kpi_col4:
     st.markdown('<div class="kpi-sub">Расход за конверсию</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+st.markdown('<div class="glass-card" style="margin-top: 1rem;">', unsafe_allow_html=True)
+st.markdown("### Executive Summary")
+exec_col1, exec_col2, exec_col3 = st.columns(3)
+with exec_col1:
+    st.metric("Лучший канал по ROAS", best_channel, f"ROAS {best_channel_roas:.2f}")
+with exec_col2:
+    st.metric("Канал с самым высоким CPA", worst_channel, f"CPA {worst_channel_cpa:.2f}")
+with exec_col3:
+    retained_pct = (rows_after_filters / rows_before_filters * 100) if rows_before_filters else 0
+    st.metric("Rows retained после фильтров", f"{rows_after_filters:,}", f"{retained_pct:.1f}% от исходных")
+st.caption(f"Δ Spend (2-я половина vs 1-я): {period_spend_delta:+.1%} | Δ Revenue: {period_revenue_delta:+.1%}")
+st.markdown('</div>', unsafe_allow_html=True)
+
 # --- Вкладки в стеклянной карточке ---
 st.markdown('<div class="glass-card" style="margin-top: 1.2rem;">', unsafe_allow_html=True)
 tab_data, tab_dashboard, tab_insights, tab_abtests = st.tabs(
@@ -302,6 +454,13 @@ tab_data, tab_dashboard, tab_insights, tab_abtests = st.tabs(
 with tab_data:
     st.subheader("Сырые данные (после фильтров)")
     st.dataframe(df.head(200))
+
+    st.subheader("Качество данных")
+    quality_df = build_data_quality_table(df_raw)
+    if not quality_df.empty:
+        st.dataframe(quality_df, use_container_width=True)
+    if "date" in df_raw.columns and pd.api.types.is_datetime64_any_dtype(df_raw["date"]):
+        st.caption(f"Диапазон дат: {df_raw['date'].min().date()} → {df_raw['date'].max().date()}")
 
     st.subheader("Агрегация по кампаниям")
     st.dataframe(df_campaigns)
@@ -369,23 +528,23 @@ with tab_dashboard:
             st.altair_chart(chart_rev, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("Scatter: CPC vs CPA по кампаниям")
+    st.subheader("Hero-chart: ROAS vs CPA по кампаниям")
 
-    if {"cpc", "cpa"}.issubset(df_campaigns.columns):
+    if {"roas", "cpa"}.issubset(df_campaigns.columns):
         scatter = (
             alt.Chart(df_campaigns)
             .mark_circle(size=60)
             .encode(
-                x=alt.X("cpc:Q", title="CPC"),
-                y=alt.Y("cpa:Q", title="CPA"),
+                x=alt.X("cpa:Q", title="CPA"),
+                y=alt.Y("roas:Q", title="ROAS"),
                 color=alt.Color("channel:N", title="Канал") if "channel" in df_campaigns.columns else alt.value("steelblue"),
                 size=alt.Size("spend:Q", title="Spend", legend=None) if "spend" in df_campaigns.columns else alt.value(60),
-                tooltip=[c for c in ["campaign", "channel", "cpc", "cpa", "spend"] if c in df_campaigns.columns],
+                tooltip=[c for c in ["campaign", "channel", "cpa", "roas", "spend"] if c in df_campaigns.columns],
             )
         )
         st.altair_chart(scatter, use_container_width=True)
     else:
-        st.info("Для scatter-графика нужны cpc и cpa (они считаются из spend/clicks/conversions).")
+        st.info("Для hero-chart нужны ROAS и CPA (они считаются из revenue/spend/conversions).")
 
 # =============== TAB 3: ИНСАЙТЫ ================
 with tab_insights:
@@ -395,15 +554,25 @@ with tab_insights:
         "Модель получит агрегированные данные по кампаниям и каналам "
         "и сформирует текстовый отчёт: общая картина, ключевые инсайты и рекомендации."
     )
+    st.caption("Провайдер LLM задается через переменную LLM_PROVIDER: ollama или openai_compatible.")
 
     if st.button("Сгенерировать инсайты"):
         with st.spinner("Генерируем инсайты с помощью локальной модели..."):
             summary_text = build_text_summary(df_campaigns, df_channels)
             prompt = marketing_insights_prompt(summary_text)
-            answer = ask_llm(prompt)
+            try:
+                answer = ask_llm(prompt)
+                st.session_state["insights_answer"] = answer
+            except RuntimeError as exc:
+                st.error(str(exc))
+                st.info(
+                    "Если приложение запущено в Streamlit Cloud, укажи внешний LLM endpoint через "
+                    "переменную окружения OLLAMA_URL (и при необходимости OLLAMA_MODEL)."
+                )
 
-        st.markdown("### 🧠 Ответ модели")
-        st.markdown(answer)
+        if st.session_state.get("insights_answer"):
+            st.markdown("### 🧠 Ответ модели")
+            st.markdown(st.session_state["insights_answer"])
 
 
 
@@ -415,6 +584,7 @@ with tab_abtests:
         "Здесь локальная модель предложит конкретные A/B-тесты на основе текущих данных: "
         "какие кампании/каналы/креативы стоит тестировать и что именно менять."
     )
+    st.caption("Можно подключить собственный endpoint через LLM_PROVIDER=openai_compatible и OPENAI_BASE_URL.")
 
     # Немного показать пользователю, что анализируем
     with st.expander("Посмотреть сводку, на основе которой строятся гипотезы"):
@@ -426,12 +596,40 @@ with tab_abtests:
         with st.spinner("Генерируем A/B-гипотезы с помощью локальной модели..."):
             ab_summary = build_ab_test_summary(df_campaigns, df_channels)
             ab_prompt = marketing_ab_test_prompt(ab_summary)
-            ab_answer = ask_llm(ab_prompt)
+            try:
+                ab_answer = ask_llm(ab_prompt)
+                st.session_state["ab_answer"] = ab_answer
+            except RuntimeError as exc:
+                st.error(str(exc))
+                st.info(
+                    "Для Streamlit Cloud используй внешний LLM endpoint и задай OLLAMA_URL/OLLAMA_MODEL "
+                    "в Secrets приложения."
+                )
 
-        st.markdown("### 🧪 Предложенные A/B-гипотезы")
-        st.markdown(ab_answer)
+        if st.session_state.get("ab_answer"):
+            st.markdown("### 🧪 Предложенные A/B-гипотезы")
+            st.markdown(st.session_state["ab_answer"])
 
 
+report_snapshot = {
+    "spend": total_spend,
+    "revenue": total_revenue,
+    "roas": overall_roas,
+    "cpa": overall_cpa,
+}
+report_summary = build_text_summary(df_campaigns, df_channels)
+report_md = build_markdown_report(
+    report_snapshot,
+    report_summary,
+    st.session_state.get("insights_answer", ""),
+    st.session_state.get("ab_answer", ""),
+)
+st.download_button(
+    "⬇️ Скачать report.md",
+    data=report_md.encode("utf-8"),
+    file_name="marketing_analytics_report.md",
+    mime="text/markdown",
+)
 
 st.markdown('</div>', unsafe_allow_html=True)  # закрываем glass-card вокруг табов
    
